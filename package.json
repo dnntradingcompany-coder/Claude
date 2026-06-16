@@ -1,0 +1,17 @@
+{
+  "name": "zalo-claude-bot",
+  "version": "1.0.0",
+  "description": "Zalo OA chatbot powered by Claude - CSKH automation",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.1",
+    "express": "^4.21.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
