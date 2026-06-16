@@ -1,108 +1,86 @@
-// Gọi Claude Managed Agent qua REST API trực tiếp (fetch + beta header).
-// Không dùng SDK beta vì phiên bản SDK hiện tại chưa hỗ trợ environments/sessions.
-//
-// Biến môi trường cần:
-//   ANTHROPIC_API_KEY  - API key
-//   CLAUDE_AGENT_ID    - id agent (vd: agent_011CaMkbGaRnpnJQULp1fX1B)
-//   CLAUDE_ENV_ID      - (tùy chọn) id environment. Nếu không có, code tự tạo 1 lần.
+// Bot CSKH: tự tải dữ liệu Google Sheets (FAQ + Products), đưa vào prompt,
+// rồi trả lời bằng Claude messages API. Nhanh & ổn định, không cần Managed Agent.
 
-const API_BASE = "https://api.anthropic.com/v1";
-const BETA_HEADER = "managed-agents-2026-04-01";
+import Anthropic from "@anthropic-ai/sdk";
 
-function headers() {
-  return {
-    "content-type": "application/json",
-    "x-api-key": process.env.ANTHROPIC_API_KEY,
-    "anthropic-version": "2023-06-01",
-    "anthropic-beta": BETA_HEADER,
-  };
-}
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const AGENT_ID = process.env.CLAUDE_AGENT_ID;
-let cachedEnvId = process.env.CLAUDE_ENV_ID || null;
+// 2 link CSV: sheet 1 = FAQ, sheet 2 = Products
+const FAQ_URL =
+  "https://docs.google.com/spreadsheets/d/e/2PACX-1vSeC3ly0VTvJ-5xEFaAioAhYr7-PKNGipls4JG6ZxvG9bk4W56FUD45ik4kie-_eGJeNr6ll-lAyu0U/pub?output=csv&gid=1822331950";
+const PRODUCTS_URL =
+  "https://docs.google.com/spreadsheets/d/e/2PACX-1vSeC3ly0VTvJ-5xEFaAioAhYr7-PKNGipls4JG6ZxvG9bk4W56FUD45ik4kie-_eGJeNr6ll-lAyu0U/pub?output=csv&gid=1405240036";
 
-// ---- Tạo environment nếu chưa có (chạy 1 lần) ----
-async function getEnvironmentId() {
-  if (cachedEnvId) return cachedEnvId;
+// Cache dữ liệu sheet trong RAM, làm mới mỗi 5 phút
+let sheetCache = "";
+let sheetCacheTime = 0;
+const CACHE_TTL = 5 * 60 * 1000;
 
-  const res = await fetch(`${API_BASE}/environments`, {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify({
-      name: "zalo-bot-env",
-      config: { type: "cloud", networking: { type: "unrestricted" } },
-    }),
-  });
-
-  const data = await res.json();
-  if (!data.id) {
-    throw new Error("Không tạo được environment: " + JSON.stringify(data));
+async function loadSheets() {
+  if (sheetCache && Date.now() - sheetCacheTime < CACHE_TTL) {
+    return sheetCache;
   }
-  cachedEnvId = data.id;
-  console.log("🌐 Đã tạo environment:", cachedEnvId);
-  return cachedEnvId;
+
+  let faq = "";
+  let products = "";
+  try {
+    faq = await (await fetch(FAQ_URL)).text();
+  } catch (e) {
+    console.error("⚠️ Lỗi tải FAQ sheet:", e.message);
+  }
+  try {
+    products = await (await fetch(PRODUCTS_URL)).text();
+  } catch (e) {
+    console.error("⚠️ Lỗi tải Products sheet:", e.message);
+  }
+
+  sheetCache = `=== FAQ SHEET ===\n${faq}\n\n=== PRODUCTS SHEET ===\n${products}`;
+  sheetCacheTime = Date.now();
+  console.log("📊 Đã tải dữ liệu Google Sheets");
+  return sheetCache;
 }
 
-// ---- Hỏi Agent, trả về text trả lời ----
+// System prompt - giữ nguyên hành vi của Agent gốc
+const SYSTEM_PROMPT_BASE = `You are a friendly and professional customer support agent for Công ty TNHH Thương Mại DNN. Your goal is to help customers resolve their issues quickly and efficiently.
+
+**Language:** Always detect and respond in the customer's language. If they write in Vietnamese, reply in Vietnamese. If English, reply in English. Match their language throughout the conversation.
+
+**Knowledge Base:** Use the FAQ data and Products data provided below to answer. When a customer asks a question: (1) check the FAQ data for a relevant answer, (2) if needed, supplement with product data, (3) then respond.
+
+**Key behaviors:**
+- Answer ONLY what the customer asked — nothing more. If they ask about stock availability, answer only with in-stock/out-of-stock status and expected restock date if available. Do NOT mention price, features, or other details unless explicitly asked.
+- Match the scope of your answer to the scope of the question — one question, one focused answer.
+- Greet customers warmly and acknowledge their concern before diving into solutions.
+- Ask clarifying questions when needed to fully understand the issue.
+- Escalate to a human agent when the issue is beyond your capabilities or the customer requests it.
+- Maintain a calm, empathetic tone — especially when customers are frustrated.
+- Use ONLY information present in the data below. Never invent prices, codes, or facts.
+- Do NOT use markdown symbols like ** or # in replies (Zalo cannot render them). Use plain text.`;
+
+// ---- Hỏi -> trả về câu trả lời ----
 export async function askAgent(userText) {
-  const environmentId = await getEnvironmentId();
+  const sheetData = await loadSheets();
 
-  // 1. Tạo session
-  const sRes = await fetch(`${API_BASE}/sessions`, {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify({
-      agent: AGENT_ID,
-      environment_id: environmentId,
-      title: "Zalo CSKH",
-    }),
-  });
-  const session = await sRes.json();
-  if (!session.id) {
-    throw new Error("Không tạo được session: " + JSON.stringify(session));
-  }
+  const systemPrompt = `${SYSTEM_PROMPT_BASE}
 
-  // 2. Gửi tin nhắn user vào session
-  await fetch(`${API_BASE}/sessions/${session.id}/events`, {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify({
-      events: [
-        {
-          type: "user.message",
-          content: [{ type: "text", text: userText }],
-        },
-      ],
-    }),
+=== KNOWLEDGE BASE DATA ===
+${sheetData}`;
+
+  const response = await anthropic.messages.create({
+    model: process.env.CLAUDE_MODEL || "claude-sonnet-4-6",
+    max_tokens: 1024,
+    system: systemPrompt,
+    messages: [{ role: "user", content: userText }],
   });
 
-  // 3. Poll các event tới khi agent idle (tối đa ~60s)
-  let answer = "";
-  let cursor = null;
-  const deadline = Date.now() + 60000;
+  let answer = response.content
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("\n")
+    .trim();
 
-  while (Date.now() < deadline) {
-    const url = new URL(`${API_BASE}/sessions/${session.id}/events`);
-    if (cursor) url.searchParams.set("after", cursor);
+  // Dọn markdown thừa cho sạch trên Zalo
+  answer = answer.replace(/\*\*/g, "").replace(/^#+\s*/gm, "");
 
-    const eRes = await fetch(url, { headers: headers() });
-    const eData = await eRes.json();
-    const events = eData.data || eData.events || [];
-
-    let idle = false;
-    for (const ev of events) {
-      cursor = ev.id || cursor;
-      if (ev.type === "agent.message" && Array.isArray(ev.content)) {
-        for (const block of ev.content) {
-          if (block.type === "text" && block.text) answer += block.text;
-        }
-      }
-      if (ev.type === "session.status_idle") idle = true;
-    }
-
-    if (idle) break;
-    await new Promise((r) => setTimeout(r, 1500)); // chờ 1.5s rồi poll tiếp
-  }
-
-  return answer.trim();
+  return answer;
 }
