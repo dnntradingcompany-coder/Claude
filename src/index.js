@@ -18,8 +18,18 @@ app.use(
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-// ---- Health check (Railway cần endpoint này để biết app sống) ----
-app.get("/", (_req, res) => res.send("Zalo-Claude bot is running ✅"));
+// ---- Health check + thẻ meta xác thực domain Zalo ----
+app.get("/", (_req, res) => {
+  res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta name="zalo-platform-site-verification" content="Mzsm1jkYEo86ePz_uBGKLnB4eW_-j7bKDZa" />
+</head>
+<body>
+  Zalo-Claude bot is running ✅
+</body>
+</html>`);
+});
 
 // ---- Verify chữ ký từ Zalo ----
 function verifyZaloSignature(req) {
