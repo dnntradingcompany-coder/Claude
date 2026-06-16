@@ -1,9 +1,7 @@
 import express from "express";
-import Anthropic from "@anthropic-ai/sdk";
 import crypto from "crypto";
 import { sendZaloMessage } from "./zalo.js";
-import { getHistory, pushMessage } from "./sessions.js";
-import { SYSTEM_PROMPT } from "./config.js";
+import { askAgent } from "./agent.js";
 
 const app = express();
 
@@ -15,8 +13,6 @@ app.use(
     },
   })
 );
-
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // ---- Health check + thẻ meta xác thực domain Zalo ----
 app.get("/", (_req, res) => {
@@ -71,27 +67,10 @@ app.post("/webhook", async (req, res) => {
 
     console.log(`📩 [${userId}]: ${userText}`);
 
-    // Lấy lịch sử + thêm tin mới
-    pushMessage(userId, { role: "user", content: userText });
-    const history = getHistory(userId);
-
-    // Gọi Claude
-    const response = await anthropic.messages.create({
-      model: process.env.CLAUDE_MODEL || "claude-sonnet-4-6",
-      max_tokens: 1024,
-      system: SYSTEM_PROMPT,
-      messages: history,
-    });
-
-    const reply = response.content
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join("\n")
-      .trim();
+    // Gọi Agent (agent tự đọc Google Sheets qua tool bash/curl)
+    const reply = await askAgent(userText);
 
     if (!reply) return;
-
-    pushMessage(userId, { role: "assistant", content: reply });
 
     // Gửi trả lời về Zalo
     await sendZaloMessage(userId, reply);
